@@ -1,0 +1,164 @@
+#!/usr/bin/env python
+
+"""Based on code from https://github.com/mstamy2/PyPDF2/issues/355.
+"""
+
+import argparse
+import json
+
+import PyPDF2
+
+
+class App(object):
+    """Application for filling in PDF form.
+    """
+
+    def __init__(self):
+        """Constructor.
+        """
+        self.show_progress = False
+        self.form_data = None
+        return
+
+    def main(self):
+        """Main entry point.
+        """
+        args = self._parse_command_line()
+        if args.show_progress:
+            self.show_progress = True
+
+        if args.dump_keys or args.all:
+            self._dump_keys(args.keys_filename, args.template_filename)
+            return
+
+        self._get_config(args.config, args.keys_filename)
+
+        if args.show_parameters or args.all:
+            self._show_parameters()
+
+        if args.write or args.all:
+            if not args.output_filename:
+                raise ValueError("Output filename required when writing form values.")
+            self._write(args.output_filename, args.template_filename)
+        return
+
+    def _write(self, output_filename, template_filename):
+        """Fill in form and write output.
+        """
+        fin = open(template_filename, "rb")
+        pdf_in = PyPDF2.PdfFileReader(fin, strict=False)
+
+        pdf_out = PyPDF2.PdfFileWriter()
+        pdf_out.addPage(pdf_in.getPage(0))
+
+        pdf_true = PyPDF2.generic.BooleanObject(True)
+        pdf_yes = PyPDF2.generic.NameObject("/Yes")
+
+        form = pdf_in.trailer["/Root"].raw_get("/AcroForm")
+        for field in form.getObject()["/Fields"]:
+            field_obj = field.getObject()
+            pdf_key = field_obj.get("/T")
+            if pdf_key in self.form_data.keys():
+                if field_obj["/FT"] == "/Tx":
+                    field_obj.update({
+                        PyPDF2.generic.NameObject("/V"): PyPDF2.generic.TextStringObject(self.form_data[pdf_key]),
+                        PyPDF2.generic.NameObject("/AP"): pdf_true,
+                        })
+                elif field_obj["/FT"] == "/Btn" and self.form_data[pdf_key]:
+                    field_obj.update({
+                        PyPDF2.generic.NameObject("/AS"): pdf_yes,
+                        PyPDF2.generic.NameObject("/V"): pdf_yes,
+                        })
+
+        pdf_out._root_object.update({
+            PyPDF2.generic.NameObject("/AcroForm"): form,
+        })
+        form.getObject().update({
+            PyPDF2.generic.NameObject("/NeedAppearances"): pdf_true,
+        })
+
+        with open(output_filename, "wb") as fout:
+            pdf_out.write(fout)
+        return
+
+    def _dump_keys(self, keys_filename, template_filename):
+        """Dump keys and descriptions to JSON file.
+        """
+        fin = open(template_filename, "rb")
+        pdf_in = PyPDF2.PdfFileReader(fin, strict=False)
+
+        form = pdf_in.trailer["/Root"].raw_get("/AcroForm")
+        fields = {}
+        for field in form.getObject()["/Fields"]:
+            field_obj = field.getObject()
+            field_key = field_obj.get("/T")
+            field_name = field_obj.get("/TU")
+            field_type = field_obj.get("/FT").replace("/Tx", "Text").replace("/Btn", "Button").replace("/Sig", "Signature")
+            fields[field_key] = "{} ({})".format(field_name, field_type)
+            
+        with open(keys_filename, "w") as fout:
+            json.dump(fields, fout, indent=4, separators=(',', ': '), sort_keys=True)
+        return
+
+    def _get_config(self, config_filenames, keys_filename):
+        """Set parameters from config file and defaults.
+
+        :type config_filename: str
+        :param config_filename: Name of configuration (INI) file with parameters.
+        """
+        import configparser
+        config = configparser.SafeConfigParser()
+        config.optionxform = str
+
+        filenames = ["defaults.cfg"]
+        filenames += config_filenames.split(",") if config_filenames else []
+        for filename in filenames:
+            if self.show_progress:
+                print("Fetching parameters from {}...".format(filename))
+            config.read(filename)
+        form_values = dict(config.items("pdf_form"))
+        self.form_data = {}
+        with open(keys_filename, "r") as fin:
+            form_keys = json.load(fin)
+        for pdf_key, value_key in form_keys.iteritems():
+            if value_key in form_values:
+                if form_values[value_key].lower() == u"false":
+                    self.form_data[pdf_key] = False
+                elif form_values[value_key].lower() == u"true":
+                    self.form_data[pdf_key] = True
+                else:
+                    self.form_data[pdf_key] = form_values[value_key]
+        return
+
+    def _show_parameters(self):
+        """Write parameters to stdout.
+        """
+        for key, value in self.form_data.items():
+            print("{} = {}".format(key, value))
+        return
+
+    def _parse_command_line(self):
+        """Parse command line arguments.
+        """
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--config", action="store", dest="config", required=False)
+        parser.add_argument("--show-parameters", action="store_true", dest="show_parameters")
+        parser.add_argument("--all", action="store_true", dest="all")
+        parser.add_argument("--quiet", action="store_false", dest="show_progress", default=True)
+
+        parser.add_argument("--form-template", action="store", dest="template_filename", default="routingsheet_template.pdf")
+        parser.add_argument("--form-keys", action="store", dest="keys_filename", default="routingsheet_keys.json")
+        parser.add_argument("--output", action="store", dest="output_filename")
+
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument("--dump-keys", action="store_true", dest="dump_keys", default=False)
+        group.add_argument("--write", action="store_true", dest="write", default=True)
+        return parser.parse_args()
+
+
+# ======================================================================
+if __name__ == "__main__":
+    App().main()
+
+
+# End of file
